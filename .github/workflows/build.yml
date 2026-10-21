@@ -1,0 +1,102 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # only used to attach the jar to a release when you push a tag like v2.8.3
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.2.0
+
+      # Works whether you uploaded the project as a proper folder tree OR as loose files in the repo root
+      # (GitHub's "upload files" does not keep folders when you drop many files at once).
+      - name: Arrange the files
+        run: |
+          set -e
+          echo "Files in the repo (excluding .git):"
+          find . -path ./.git -prune -o -type f -print | sort | head -80
+
+          # 1) the whole project sits in a sub-folder (e.g. a zip was uploaded and extracted into nova-client/)
+          if [ ! -f src/main/java/nova/NovaClient.java ]; then
+            NC=$(find . -path ./.git -prune -o -type f -path '*/src/main/java/nova/NovaClient.java' -print | head -1)
+            if [ -n "$NC" ]; then
+              DIR="${NC%/src/main/java/nova/NovaClient.java}"
+              if [ "$DIR" != "." ] && [ -n "$DIR" ]; then
+                echo "Project found in $DIR - using it from the repo root"
+                cp -r "$DIR"/. .
+              fi
+            fi
+          fi
+
+          # 2) loose .java files in the root: every file goes to the folder named by its own 'package' line
+          if [ ! -f src/main/java/nova/NovaClient.java ]; then
+            for f in ./*.java; do
+              [ -e "$f" ] || continue
+              pkg=$(grep -m1 -E '^[[:space:]]*package[[:space:]]+' "$f" | sed -E 's/^[[:space:]]*package[[:space:]]+([A-Za-z0-9_.]+).*/\1/' | tr -d '\r')
+              [ -n "$pkg" ] || { echo "skipping $f (no package line)"; continue; }
+              d="src/main/java/$(echo "$pkg" | tr . /)"
+              mkdir -p "$d"
+              mv "$f" "$d/"
+              echo "moved $f -> $d/"
+            done
+          fi
+          mkdir -p src/main/resources
+          if [ -f fabric.mod.json ] && [ ! -f src/main/resources/fabric.mod.json ]; then mv fabric.mod.json src/main/resources/; fi
+
+          # stray files that only confuse things
+          rm -f javac.*.args
+
+          if [ ! -f src/main/java/nova/NovaClient.java ]; then
+            echo "::error::NovaClient.java was not found anywhere in the repo."
+            find . -path ./.git -prune -o -type f -print | sort | head -80
+            exit 1
+          fi
+          test -f build.gradle    || { echo "::error::build.gradle must be in the repo root"; exit 1; }
+          test -f settings.gradle || { echo "::error::settings.gradle must be in the repo root"; exit 1; }
+          test -f gradle.properties || { echo "::error::gradle.properties must be in the repo root"; exit 1; }
+          test -f src/main/resources/fabric.mod.json || { echo "::error::fabric.mod.json is missing"; exit 1; }
+          echo "Layout OK:"
+          find src -type f | sort
+
+      - name: Build
+        run: gradle build --stacktrace
+
+      - name: Check the jar is not empty
+        run: |
+          ls -la build/libs/
+          JAR=$(ls build/libs/nova-client-*.jar | grep -v -e '-sources' -e '-dev' | head -1)
+          echo "Checking $JAR"
+          unzip -l "$JAR"
+          unzip -l "$JAR" | grep -q 'fabric.mod.json'
+          unzip -l "$JAR" | grep -q 'nova/NovaClient.class'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nova-client
+          path: |
+            build/libs/*.jar
+            !build/libs/*-sources.jar
+
+      # Optional: push a tag (git tag v2.8.2 && git push origin v2.8.2) and the jar is attached to a GitHub Release
+      - name: Attach jar to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/libs/nova-client-*.jar
+            !build/libs/*-sources.jar
