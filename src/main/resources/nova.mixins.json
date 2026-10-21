@@ -1,0 +1,8 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "nova.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": ["CameraMixin", "EntityLookMixin", "LivingSwingMixin", "TridentMixin"],
+  "injectors": { "defaultRequire": 0 }
+}
